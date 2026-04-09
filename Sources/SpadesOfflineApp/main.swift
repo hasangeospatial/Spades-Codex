@@ -72,7 +72,9 @@ final class SpadesViewModel {
 
     func newHand() {
         let seed = UInt64(Date().timeIntervalSince1970)
-        localPlayerIndex = 0
+        if selectedMode == .soloOffline {
+            localPlayerIndex = 0
+        }
         game = SpadesGameState(seed: seed, botDifficulty: selectedDifficulty)
         statusMessage = selectedMode == .soloOffline
             ? "New offline hand started"
