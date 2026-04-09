@@ -52,6 +52,12 @@ public struct PlayedCard: Equatable {
     public let card: Card
 }
 
+public enum BotDifficulty: String, CaseIterable, Codable {
+    case easy
+    case medium
+    case hard
+}
+
 public enum SpadesRuleError: Error, Equatable {
     case cardNotInHand
     case mustFollowSuit
@@ -65,13 +71,15 @@ public struct SpadesGameState {
     public private(set) var trick: [PlayedCard]
     public private(set) var spadesBroken: Bool
     public private(set) var scoreboard: ScoreBoard
+    public private(set) var botDifficulty: BotDifficulty
 
-    public init(seed: UInt64 = 1) {
+    public init(seed: UInt64 = 1, botDifficulty: BotDifficulty = .medium) {
         self.players = (0..<4).map { PlayerState(id: $0) }
         self.currentPlayer = 0
         self.trick = []
         self.spadesBroken = false
         self.scoreboard = ScoreBoard()
+        self.botDifficulty = botDifficulty
         dealHands(seed: seed)
         assignSimpleBids()
     }
@@ -81,13 +89,15 @@ public struct SpadesGameState {
         currentPlayer: Int,
         trick: [PlayedCard],
         spadesBroken: Bool,
-        scoreboard: ScoreBoard = ScoreBoard()
+        scoreboard: ScoreBoard = ScoreBoard(),
+        botDifficulty: BotDifficulty = .medium
     ) {
         self.players = players
         self.currentPlayer = currentPlayer
         self.trick = trick
         self.spadesBroken = spadesBroken
         self.scoreboard = scoreboard
+        self.botDifficulty = botDifficulty
     }
 
     mutating func dealHands(seed: UInt64) {
@@ -103,7 +113,7 @@ public struct SpadesGameState {
 
     mutating func assignSimpleBids() {
         for index in players.indices {
-            players[index].bid = BotBrain.estimateBid(for: players[index].hand)
+            players[index].bid = BotBrain.estimateBid(for: players[index].hand, difficulty: botDifficulty)
         }
     }
 
@@ -163,7 +173,12 @@ public struct SpadesGameState {
 
     public mutating func playBotTurnIfNeeded() {
         guard currentPlayer != 0 else { return }
-        let botCard = BotBrain.chooseCard(for: players[currentPlayer].hand, trick: trick, legalCards: legalCardsForCurrentPlayer)
+        let botCard = BotBrain.chooseCard(
+            for: players[currentPlayer].hand,
+            trick: trick,
+            legalCards: legalCardsForCurrentPlayer,
+            difficulty: botDifficulty
+        )
         _ = try? play(card: botCard)
     }
 
@@ -209,15 +224,40 @@ public struct SpadesGameState {
 }
 
 public struct BotBrain {
-    public static func estimateBid(for hand: [Card]) -> Int {
+    public static func estimateBid(for hand: [Card], difficulty: BotDifficulty) -> Int {
         let highSpades = hand.filter { $0.suit == .spades && $0.rank.rawValue >= Rank.jack.rawValue }.count
         let aces = hand.filter { $0.rank == .ace }.count
         let kings = hand.filter { $0.rank == .king }.count
-        let estimated = max(1, min(6, highSpades + aces + max(0, kings - 1) / 2))
-        return estimated
+        switch difficulty {
+        case .easy:
+            return max(1, min(4, highSpades + (aces / 2)))
+        case .medium:
+            return max(1, min(6, highSpades + aces + max(0, kings - 1) / 2))
+        case .hard:
+            let voidBonus = Suit.allCases.reduce(0) { partial, suit in
+                partial + (hand.contains(where: { $0.suit == suit }) ? 0 : 1)
+            }
+            return max(2, min(8, highSpades + aces + kings / 2 + voidBonus))
+        }
     }
 
-    public static func chooseCard(for hand: [Card], trick: [PlayedCard], legalCards: [Card]) -> Card {
+    public static func chooseCard(
+        for hand: [Card],
+        trick: [PlayedCard],
+        legalCards: [Card],
+        difficulty: BotDifficulty
+    ) -> Card {
+        switch difficulty {
+        case .easy:
+            return legalCards.min { $0.rank.rawValue < $1.rank.rawValue }!
+        case .medium:
+            return mediumCardChoice(trick: trick, legalCards: legalCards)
+        case .hard:
+            return hardCardChoice(trick: trick, legalCards: legalCards)
+        }
+    }
+
+    static func mediumCardChoice(trick: [PlayedCard], legalCards: [Card]) -> Card {
         guard !trick.isEmpty else {
             return legalCards.min { $0.rank.rawValue < $1.rank.rawValue }!
         }
@@ -233,6 +273,43 @@ public struct BotBrain {
         }
 
         return legalCards.min { $0.rank.rawValue < $1.rank.rawValue }!
+    }
+
+    static func hardCardChoice(trick: [PlayedCard], legalCards: [Card]) -> Card {
+        guard !trick.isEmpty else {
+            let center = legalCards.count / 2
+            return legalCards.sorted(by: SpadesGameState.sortCard)[center]
+        }
+
+        let leadSuit = trick[0].card.suit
+        let winningPlay = winningPlayedCard(in: trick)
+        if winningPlay.player % 2 == 1 {
+            let winningCandidates = legalCards
+                .filter { canBeat(candidate: $0, winning: winningPlay.card, leadSuit: leadSuit) }
+                .sorted(by: SpadesGameState.sortCard)
+            if let lowestWinning = winningCandidates.first {
+                return lowestWinning
+            }
+        }
+        return legalCards.sorted(by: SpadesGameState.sortCard).first!
+    }
+
+    static func winningPlayedCard(in trick: [PlayedCard]) -> PlayedCard {
+        let winner = SpadesGameState.evaluateTrickWinner(trick)
+        return trick.first(where: { $0.player == winner }) ?? trick[0]
+    }
+
+    static func canBeat(candidate: Card, winning: Card, leadSuit: Suit) -> Bool {
+        if candidate.suit == winning.suit {
+            return candidate.rank.rawValue > winning.rank.rawValue
+        }
+        if candidate.suit == .spades && winning.suit != .spades {
+            return true
+        }
+        if candidate.suit == leadSuit && winning.suit != .spades && winning.suit != leadSuit {
+            return true
+        }
+        return false
     }
 }
 

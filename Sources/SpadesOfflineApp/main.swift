@@ -3,6 +3,9 @@ import SpadesCore
 
 #if canImport(SwiftUI)
 import SwiftUI
+#if canImport(GameKit)
+import GameKit
+#endif
 
 @main
 struct SpadesOfflineAppMain: App {
@@ -15,14 +18,34 @@ struct SpadesOfflineAppMain: App {
     }
 }
 
+enum GameMode: String, CaseIterable {
+    case soloOffline = "Solo Offline"
+    case onlineMultiplayer = "Online Multiplayer"
+}
+
 @Observable
 final class SpadesViewModel {
-    var game = SpadesGameState(seed: UInt64(Date().timeIntervalSince1970))
+    var selectedDifficulty: BotDifficulty = .medium
+    var selectedMode: GameMode = .soloOffline
+    var game = SpadesGameState(seed: UInt64(Date().timeIntervalSince1970), botDifficulty: .medium)
     var statusMessage = "Your turn"
+
+    #if canImport(GameKit)
+    let onlineService = OnlineMatchService()
+    #endif
+
+    init() {
+        #if canImport(GameKit)
+        onlineService.onRemoteAction = { [weak self] action in
+            self?.applyRemoteAction(action)
+        }
+        #endif
+    }
 
     func playHumanCard(_ card: Card) {
         do {
             _ = try game.play(card: card)
+            publishOnlineAction(.playCard(player: 0, card: card))
             progressBotsIfNeeded()
             if game.handComplete {
                 game.finalizeHand()
@@ -36,6 +59,7 @@ final class SpadesViewModel {
     }
 
     func progressBotsIfNeeded() {
+        guard selectedMode == .soloOffline else { return }
         while game.currentPlayer != 0 && !game.handComplete {
             game.playBotTurnIfNeeded()
         }
@@ -43,9 +67,50 @@ final class SpadesViewModel {
 
     func newHand() {
         let seed = UInt64(Date().timeIntervalSince1970)
-        game = SpadesGameState(seed: seed)
-        statusMessage = "New offline hand started"
+        game = SpadesGameState(seed: seed, botDifficulty: selectedDifficulty)
+        statusMessage = selectedMode == .soloOffline
+            ? "New offline hand started"
+            : "Online hand started"
+        publishOnlineAction(.newHand(seed: seed, difficulty: selectedDifficulty))
+        progressBotsIfNeeded()
     }
+
+    func applyDifficulty(_ difficulty: BotDifficulty) {
+        selectedDifficulty = difficulty
+        newHand()
+    }
+
+    #if canImport(GameKit)
+    func authenticateGameCenter() {
+        onlineService.authenticate()
+    }
+
+    func startOnlineMatchmaking() {
+        onlineService.startMatchmaking()
+        statusMessage = "Opening Game Center matchmaking..."
+    }
+
+    private func publishOnlineAction(_ action: OnlineAction) {
+        guard selectedMode == .onlineMultiplayer else { return }
+        onlineService.send(action: action)
+    }
+
+    private func applyRemoteAction(_ action: OnlineAction) {
+        switch action {
+        case .newHand(let seed, let difficulty):
+            game = SpadesGameState(seed: seed, botDifficulty: difficulty)
+            statusMessage = "Remote player started a new hand"
+        case .playCard(_, let card):
+            _ = try? game.play(card: card)
+            statusMessage = "Remote player made a move"
+        }
+    }
+    #else
+    func authenticateGameCenter() { }
+    func startOnlineMatchmaking() {
+        statusMessage = "Online multiplayer requires iOS with Game Center support"
+    }
+    #endif
 }
 
 struct SpadesGameView: View {
@@ -53,8 +118,49 @@ struct SpadesGameView: View {
 
     var body: some View {
         VStack(spacing: 12) {
-            Text("Spades (Offline, No Ads)")
+            Text("Spades")
                 .font(.title2).bold()
+
+            Text("Offline no-ads mode + Game Center online options")
+                .font(.footnote)
+                .foregroundStyle(.secondary)
+
+            Picker("Game Mode", selection: Binding(
+                get: { viewModel.selectedMode },
+                set: {
+                    viewModel.selectedMode = $0
+                    viewModel.newHand()
+                }
+            )) {
+                ForEach(GameMode.allCases, id: \.self) { mode in
+                    Text(mode.rawValue).tag(mode)
+                }
+            }
+            .pickerStyle(.segmented)
+
+            Picker("Difficulty", selection: Binding(
+                get: { viewModel.selectedDifficulty },
+                set: { viewModel.applyDifficulty($0) }
+            )) {
+                ForEach(BotDifficulty.allCases, id: \.self) { level in
+                    Text(level.rawValue.capitalized).tag(level)
+                }
+            }
+            .pickerStyle(.segmented)
+
+            if viewModel.selectedMode == .onlineMultiplayer {
+                HStack {
+                    Button("Game Center Login") {
+                        viewModel.authenticateGameCenter()
+                    }
+                    .buttonStyle(.bordered)
+
+                    Button("Find Match") {
+                        viewModel.startOnlineMatchmaking()
+                    }
+                    .buttonStyle(.borderedProminent)
+                }
+            }
 
             Text(viewModel.statusMessage)
                 .foregroundStyle(.secondary)
@@ -98,7 +204,10 @@ struct SpadesGameView: View {
             .buttonStyle(.bordered)
         }
         .padding()
-        .onAppear { viewModel.progressBotsIfNeeded() }
+        .onAppear {
+            viewModel.newHand()
+            viewModel.progressBotsIfNeeded()
+        }
     }
 
     private func label(for card: Card) -> String {
@@ -124,12 +233,67 @@ struct SpadesGameView: View {
         }
     }
 }
+
+#if canImport(GameKit)
+enum OnlineAction: Codable {
+    case newHand(seed: UInt64, difficulty: BotDifficulty)
+    case playCard(player: Int, card: Card)
+}
+
+@Observable
+final class OnlineMatchService: NSObject, GKMatchDelegate {
+    private var match: GKMatch?
+    var onRemoteAction: ((OnlineAction) -> Void)?
+
+    func authenticate() {
+        GKLocalPlayer.local.authenticateHandler = { _, error in
+            if let error {
+                print("Game Center auth error: \(error.localizedDescription)")
+            }
+        }
+    }
+
+    func startMatchmaking() {
+        let request = GKMatchRequest()
+        request.minPlayers = 2
+        request.maxPlayers = 4
+        GKMatchmaker.shared().findMatch(for: request) { [weak self] match, error in
+            if let error {
+                print("Matchmaking error: \(error.localizedDescription)")
+                return
+            }
+            self?.match = match
+            self?.match?.delegate = self
+        }
+    }
+
+    func send(action: OnlineAction) {
+        guard let match else { return }
+        do {
+            let payload = try JSONEncoder().encode(action)
+            try match.sendData(toAllPlayers: payload, with: .reliable)
+        } catch {
+            print("Failed to send online action: \(error.localizedDescription)")
+        }
+    }
+
+    func match(_ match: GKMatch, didReceive data: Data, fromRemotePlayer player: GKPlayer) {
+        guard let action = try? JSONDecoder().decode(OnlineAction.self, from: data) else { return }
+        onRemoteAction?(action)
+    }
+
+    func match(_ match: GKMatch, player: GKPlayer, didChange state: GKPlayerConnectionState) {
+        print("Player connection state changed: \(player.displayName) -> \(state.rawValue)")
+    }
+}
+#endif
+
 #else
 
 @main
 struct SpadesOfflineAppMain {
     static func main() {
-        print("SpadesOfflineApp includes a SwiftUI iOS app. Open this package in Xcode on macOS to run the UI.")
+        print("SpadesOfflineApp includes a SwiftUI iOS app with online matchmaking options. Open this package in Xcode on macOS to run the UI.")
     }
 }
 #endif

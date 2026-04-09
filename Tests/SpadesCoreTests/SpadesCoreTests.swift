@@ -42,6 +42,19 @@ final class SpadesCoreTests: XCTestCase {
         XCTAssertEqual(SpadesGameState.score(tricks: 4, bid: 6), -60)
     }
 
+    func testEasyAndHardBidDifferForStrongHand() {
+        let strongHand: [Card] = [
+            .init(suit: .spades, rank: .ace),
+            .init(suit: .spades, rank: .king),
+            .init(suit: .spades, rank: .queen),
+            .init(suit: .hearts, rank: .ace),
+            .init(suit: .diamonds, rank: .ace)
+        ]
+        let easy = BotBrain.estimateBid(for: strongHand, difficulty: .easy)
+        let hard = BotBrain.estimateBid(for: strongHand, difficulty: .hard)
+        XCTAssertLessThan(easy, hard)
+    }
+
     private func forcedState(
         currentPlayer: Int,
         trick: [PlayedCard],
