@@ -29,6 +29,7 @@ final class SpadesViewModel {
     var selectedMode: GameMode = .soloOffline
     var game = SpadesGameState(seed: UInt64(Date().timeIntervalSince1970), botDifficulty: .medium)
     var statusMessage = "Your turn"
+    var localPlayerIndex = 0
 
     #if canImport(GameKit)
     let onlineService = OnlineMatchService()
@@ -39,19 +40,23 @@ final class SpadesViewModel {
         onlineService.onRemoteAction = { [weak self] action in
             self?.applyRemoteAction(action)
         }
+        onlineService.onSeatAssigned = { [weak self] seat in
+            self?.localPlayerIndex = seat
+            self?.statusMessage = "You are Player \(seat + 1)"
+        }
         #endif
     }
 
     func playHumanCard(_ card: Card) {
         do {
-            _ = try game.play(card: card)
-            publishOnlineAction(.playCard(player: 0, card: card))
+            _ = try game.play(card: card, for: localPlayerIndex)
+            publishOnlineAction(.playCard(player: localPlayerIndex, card: card))
             progressBotsIfNeeded()
             if game.handComplete {
                 game.finalizeHand()
                 statusMessage = "Hand complete! Team A: \(game.scoreboard.teamA), Team B: \(game.scoreboard.teamB)"
             } else {
-                statusMessage = game.currentPlayer == 0 ? "Your turn" : "Bots are thinking..."
+                statusMessage = game.currentPlayer == localPlayerIndex ? "Your turn" : "Waiting for other players..."
             }
         } catch {
             statusMessage = "Illegal move"
@@ -60,13 +65,14 @@ final class SpadesViewModel {
 
     func progressBotsIfNeeded() {
         guard selectedMode == .soloOffline else { return }
-        while game.currentPlayer != 0 && !game.handComplete {
+        while game.currentPlayer != localPlayerIndex && !game.handComplete {
             game.playBotTurnIfNeeded()
         }
     }
 
     func newHand() {
         let seed = UInt64(Date().timeIntervalSince1970)
+        localPlayerIndex = 0
         game = SpadesGameState(seed: seed, botDifficulty: selectedDifficulty)
         statusMessage = selectedMode == .soloOffline
             ? "New offline hand started"
@@ -100,9 +106,13 @@ final class SpadesViewModel {
         case .newHand(let seed, let difficulty):
             game = SpadesGameState(seed: seed, botDifficulty: difficulty)
             statusMessage = "Remote player started a new hand"
-        case .playCard(_, let card):
-            _ = try? game.play(card: card)
-            statusMessage = "Remote player made a move"
+        case .playCard(let player, let card):
+            do {
+                _ = try game.play(card: card, for: player)
+                statusMessage = "Player \(player + 1) played \(card.rank.rawValue)\(card.suit.rawValue.prefix(1).uppercased())"
+            } catch {
+                statusMessage = "Remote move rejected: \(error)"
+            }
         }
     }
     #else
@@ -186,8 +196,8 @@ struct SpadesGameView: View {
 
             GroupBox("Your Hand") {
                 LazyVGrid(columns: Array(repeating: GridItem(.flexible()), count: 4), spacing: 8) {
-                    ForEach(viewModel.game.players[0].hand, id: \.self) { card in
-                        let legal = viewModel.game.legalCardsForCurrentPlayer.contains(card) && viewModel.game.currentPlayer == 0
+                    ForEach(viewModel.game.players[viewModel.localPlayerIndex].hand, id: \.self) { card in
+                        let legal = viewModel.game.legalCardsForCurrentPlayer.contains(card) && viewModel.game.currentPlayer == viewModel.localPlayerIndex
                         Button(label(for: card)) {
                             viewModel.playHumanCard(card)
                         }
@@ -244,6 +254,7 @@ enum OnlineAction: Codable {
 final class OnlineMatchService: NSObject, GKMatchDelegate {
     private var match: GKMatch?
     var onRemoteAction: ((OnlineAction) -> Void)?
+    var onSeatAssigned: ((Int) -> Void)?
 
     func authenticate() {
         GKLocalPlayer.local.authenticateHandler = { _, error in
@@ -264,6 +275,7 @@ final class OnlineMatchService: NSObject, GKMatchDelegate {
             }
             self?.match = match
             self?.match?.delegate = self
+            self?.assignSeatIfPossible()
         }
     }
 
@@ -284,6 +296,16 @@ final class OnlineMatchService: NSObject, GKMatchDelegate {
 
     func match(_ match: GKMatch, player: GKPlayer, didChange state: GKPlayerConnectionState) {
         print("Player connection state changed: \(player.displayName) -> \(state.rawValue)")
+        assignSeatIfPossible()
+    }
+
+    private func assignSeatIfPossible() {
+        guard let match else { return }
+        let local = GKLocalPlayer.local
+        let remotePlayers = match.players
+        let participants = ([local] + remotePlayers).sorted(by: { $0.gamePlayerID < $1.gamePlayerID })
+        guard let index = participants.firstIndex(where: { $0.gamePlayerID == local.gamePlayerID }) else { return }
+        onSeatAssigned?(index % 4)
     }
 }
 #endif
