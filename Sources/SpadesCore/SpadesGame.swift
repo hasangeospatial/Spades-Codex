@@ -60,6 +60,7 @@ public enum BotDifficulty: String, CaseIterable, Codable {
 
 public enum SpadesRuleError: Error, Equatable {
     case cardNotInHand
+    case notPlayersTurn
     case mustFollowSuit
     case spadesNotBroken
     case cannotLeadSpadeWhenOtherSuitAvailable
@@ -135,6 +136,15 @@ public struct SpadesGameState {
 
     @discardableResult
     public mutating func play(card: Card) throws -> Int? {
+        try play(card: card, for: currentPlayer)
+    }
+
+    @discardableResult
+    public mutating func play(card: Card, for player: Int) throws -> Int? {
+        guard player == currentPlayer else {
+            throw SpadesRuleError.notPlayersTurn
+        }
+
         let player = currentPlayer
         guard let cardIndex = players[player].hand.firstIndex(of: card) else {
             throw SpadesRuleError.cardNotInHand

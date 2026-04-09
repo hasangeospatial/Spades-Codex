@@ -55,6 +55,24 @@ final class SpadesCoreTests: XCTestCase {
         XCTAssertLessThan(easy, hard)
     }
 
+    func testPlayForRejectsWrongPlayerTurn() {
+        var game = forcedState(
+            currentPlayer: 1,
+            trick: [],
+            players: [
+                .init(id: 0, hand: [.init(suit: .clubs, rank: .two)]),
+                .init(id: 1, hand: [.init(suit: .clubs, rank: .three)]),
+                .init(id: 2, hand: []),
+                .init(id: 3, hand: [])
+            ],
+            spadesBroken: false
+        )
+
+        XCTAssertThrowsError(try game.play(card: .init(suit: .clubs, rank: .two), for: 0)) { error in
+            XCTAssertEqual(error as? SpadesRuleError, .notPlayersTurn)
+        }
+    }
+
     private func forcedState(
         currentPlayer: Int,
         trick: [PlayedCard],
